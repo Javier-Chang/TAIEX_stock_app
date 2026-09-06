@@ -44,17 +44,17 @@ min_price = st.number_input("最低股價門檻 (≧)", value=500, step=50)
 col1, col2 = st.columns(2)
 with col1:
     min_day_k = st.number_input(
-        "日 K 最小值", min_value=0.0, max_value=100.0, value=0.0, step=1.0
+        "日 K 最小值", min_value=0.0, max_value=100.0, value=0.0, step=5.0
     )
     min_day_d = st.number_input(
-        "日 D 最小值", min_value=0.0, max_value=100.0, value=0.0, step=1.0
+        "日 D 最小值", min_value=0.0, max_value=100.0, value=0.0, step=5.0
     )
 with col2:
     max_day_k = st.number_input(
-        "日 K 最大值", min_value=0.0, max_value=100.0, value=30.0, step=1.0
+        "日 K 最大值", min_value=0.0, max_value=100.0, value=90.0, step=5.0
     )
     max_day_d = st.number_input(
-        "日 D 最大值", min_value=0.0, max_value=100.0, value=30.0, step=1.0
+        "日 D 最大值", min_value=0.0, max_value=100.0, value=90.0, step=5.0
     )
 
 st.markdown("---")
@@ -63,18 +63,18 @@ st.markdown("---")
 col3, col4, col5 = st.columns(3)
 with col3:
     min_dif, max_dif = (
-        st.number_input("DIF (快線) 最小值", value=-10.0, step=0.5),
-        st.number_input("DIF (快線) 最大值", value=10.0, step=0.5),
+        st.number_input("DIF (快線) 最小值", value=-10.0, step=1.0),
+        st.number_input("DIF (快線) 最大值", value=10.0, step=1.0),
     )
 with col4:
     min_dea, max_dea = (
-        st.number_input("MACD (慢線/DEM) 最小值", value=-10.0, step=0.5),
-        st.number_input("MACD (慢線/DEM) 最大值", value=10.0, step=0.5),
+        st.number_input("MACD (慢線/DEM) 最小值", value=-10.0, step=1.0),
+        st.number_input("MACD (慢線/DEM) 最大值", value=10.0, step=1.0),
     )
 with col5:
     min_hist, max_hist = (
-        st.number_input("MACD 柱狀體 最小值", value=-5.0, step=0.5),
-        st.number_input("MACD 柱狀體 最大值", value=5.0, step=0.5),
+        st.number_input("MACD 柱狀體 最小值", value=-5.0, step=1.0),
+        st.number_input("MACD 柱狀體 最大值", value=5.0, step=1.0),
     )
 
 if st.button("開始掃描運算"):
