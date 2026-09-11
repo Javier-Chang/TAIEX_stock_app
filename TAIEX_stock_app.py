@@ -1,4 +1,5 @@
 import pandas as pd
+import requests
 import streamlit as st
 import yfinance as yf
 
@@ -7,7 +8,8 @@ import yfinance as yf
 def check_password():
     if "APP_PASSWORD" not in st.secrets:
         st.error(
-            "⚠️ 未設定 `APP_PASSWORD`！請在 Streamlit Secrets 或 .streamlit/secrets.toml 中設定。"
+            "⚠️ 未設定 `APP_PASSWORD`！請在 Streamlit Secrets 或"
+            " .streamlit/secrets.toml 中設定。"
         )
         return False
 
@@ -30,6 +32,99 @@ if not check_password():
     st.stop()  # 密碼不對就停止載入後續的股票畫面
 # --------------------------------------------------
 
+# ----------------- 獲取上市與上櫃股票資料 -----------------
+@st.cache_data(ttl=600)
+def fetch_all_stocks():
+    stocks = []
+
+    # 1. 抓取上市股票 (TWSE)
+    try:
+        url_twse = (
+            "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+        )
+        df_twse = pd.read_json(url_twse)
+        for _, r in df_twse.iterrows():
+            c = str(r.get("Code", "")).strip()
+            p = str(r.get("ClosingPrice", "")).replace(",", "").strip()
+            n = str(r.get("Name", "")).strip()
+            if len(c) == 4 and c.isdigit():
+                stocks.append(
+                    {"Code": c, "Name": n, "Price": p, "Market": "TW"}
+                )
+    except Exception:
+        pass
+
+    # 2. 抓取上櫃股票 (TPEx 官方每日收盤價 API)
+    tpex_success = False
+    try:
+        url_tpex = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+        res = requests.get(url_tpex, timeout=10)
+        if res.status_code == 200:
+            for r in res.json():
+                c = str(r.get("SecuritiesCompanyCode", "")).strip()
+                n = str(r.get("CompanyName", "")).strip()
+                p = str(r.get("Close", "")).replace(",", "").strip()
+                if len(c) == 4 and c.isdigit():
+                    stocks.append(
+                        {"Code": c, "Name": n, "Price": p, "Market": "TWO"}
+                    )
+            tpex_success = True
+    except Exception:
+        pass
+
+    # 備援：若 OpenAPI 異常，改由備用網頁 API 接手
+    if not tpex_success:
+        try:
+            res = requests.get(
+                "https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw",
+                timeout=10,
+            ).json()
+            for r in res.get("aaData", []):
+                if len(r) >= 3:
+                    c = str(r[0]).strip()
+                    n = str(r[1]).strip()
+                    p = str(r[2]).replace(",", "").strip()
+                    if len(c) == 4 and c.isdigit():
+                        stocks.append(
+                            {"Code": c, "Name": n, "Price": p, "Market": "TWO"}
+                        )
+        except Exception:
+            pass
+
+    df = pd.DataFrame(stocks)
+    if not df.empty:
+        df["Price"] = pd.to_numeric(df["Price"], errors="coerce")
+        df = df.dropna(subset=["Price"])
+        df = df[df["Price"] > 0]
+        return df.drop_duplicates(subset=["Code"])
+
+    return pd.DataFrame(columns=["Code", "Name", "Price", "Market"])
+
+
+def download_stock_data(code, default_market):
+    primary_mkt = default_market if default_market in ["TW", "TWO"] else "TW"
+    secondary_mkt = "TWO" if primary_mkt == "TW" else "TW"
+
+    for mkt in [primary_mkt, secondary_mkt]:
+        try:
+            df = yf.download(
+                f"{code}.{mkt}",
+                period="6mo",
+                interval="1d",
+                progress=False,
+                threads=False,
+            )
+            if not df.empty and len(df) >= 26:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                return df
+        except Exception:
+            pass
+    return pd.DataFrame()
+
+
+# --------------------------------------------------
+
 st.title("📈 台股全市場・自訂股價、日 KD 與日 MACD 篩選器")
 
 if "matched_results" not in st.session_state:
@@ -40,7 +135,7 @@ if "has_run" not in st.session_state:
 # 第一排：股價門檻
 min_price = st.number_input("最低股價門檻 (≧)", value=500, step=50)
 
-# 第二排：日 KD 範圍設定 (改為 number_input 獨立輸入框)
+# 第二排：日 KD 範圍設定
 col1, col2 = st.columns(2)
 with col1:
     min_day_k = st.number_input(
@@ -80,16 +175,15 @@ with col5:
 if st.button("開始掃描運算"):
     st.session_state.has_run = True
     with st.spinner("正在向交易所抓取清單並計算 KD/MACD，請稍候..."):
-        url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-        df_all = pd.read_json(url)
+        df_all = fetch_all_stocks()
 
-        df_all["ClosingPrice"] = pd.to_numeric(
-            df_all["ClosingPrice"].astype(str).str.replace(",", ""),
-            errors="coerce",
+        tw_cnt = len(df_all[df_all["Market"] == "TW"])
+        two_cnt = len(df_all[df_all["Market"] == "TWO"])
+        st.info(
+            f"💡 成功獲取股票總清單：上市 {tw_cnt} 檔，上櫃 {two_cnt} 檔"
         )
-        df_all = df_all.dropna(subset=["ClosingPrice"])
 
-        target_stocks = df_all[df_all["ClosingPrice"] >= min_price]
+        target_stocks = df_all[df_all["Price"] >= min_price]
 
         matched = []
         progress_bar = st.progress(0)
@@ -114,7 +208,7 @@ if st.button("開始掃描運算"):
                 d_list, index=df.index
             )
 
-        # 計算 MACD 函式 (使用標準 12, 26, 9 參數)
+        # 計算 MACD 函式
         def calc_macd_series(df):
             if len(df) < 26:
                 zero_s = pd.Series([0.0] * len(df), index=df.index)
@@ -127,22 +221,14 @@ if st.button("開始掃描運算"):
             return dif, dea, macd_hist
 
         for i, (_, row) in enumerate(target_stocks.iterrows()):
-            code = str(row["Code"])
+            code = str(row["Code"]).strip()
             name = row["Name"]
-            if len(code) != 4:
-                continue
+            mkt = row.get("Market", "TW")
 
             try:
-                df_d = yf.download(
-                    f"{code}.TW", period="6mo", interval="1d", progress=False
-                )
+                df_d = download_stock_data(code, mkt)
 
                 if not df_d.empty and len(df_d) >= 26:
-                    df_d.columns = [
-                        c[0] if isinstance(c, tuple) else c for c in df_d.columns
-                    ]
-
-                    # 技術指標計算
                     dk_s, dd_s = calc_kd_series(df_d)
                     dif_s, dea_s, hist_s = calc_macd_series(df_d)
 
@@ -153,7 +239,6 @@ if st.button("開始掃描運算"):
                     hist = round(hist_s.iloc[-1], 2)
                     latest_price = int(round(df_d["Close"].iloc[-1]))
 
-                    # 條件判定
                     kd_pass = (min_day_k <= dk <= max_day_k) and (
                         min_day_d <= dd <= max_day_d
                     )
@@ -168,6 +253,7 @@ if st.button("開始掃描運算"):
                             {
                                 "代號": code,
                                 "名稱": name,
+                                "市場": "上櫃" if mkt == "TWO" else "上市",
                                 "股價": latest_price,
                                 "日K": dk,
                                 "日D": dd,
@@ -176,7 +262,7 @@ if st.button("開始掃描運算"):
                                 "柱狀體": hist,
                             }
                         )
-            except:
+            except Exception:
                 pass
 
             if total > 0:
@@ -188,7 +274,7 @@ if st.session_state.has_run:
     st.subheader("📊 符合條件的股票清單")
     matched = st.session_state.matched_results
     if matched:
-        st.success(f"找到 {len(matched)} 檔符合條件的股票！")
+        st.success(f"找到 {len(matched)} 档符合條件的股票！")
         st.dataframe(pd.DataFrame(matched))
     else:
         st.warning("在目前的篩選條件下，沒有找到符合的股票。")
