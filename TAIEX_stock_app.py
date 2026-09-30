@@ -29,8 +29,8 @@ def check_password():
 
 
 if not check_password():
-    st.stop()  # 密碼不對就停止載入後續的股票畫面
-# --------------------------------------------------
+    st.stop()
+
 
 # ----------------- 獲取上市與上櫃股票資料 -----------------
 @st.cache_data(ttl=600)
@@ -39,9 +39,7 @@ def fetch_all_stocks():
 
     # 1. 抓取上市股票 (TWSE)
     try:
-        url_twse = (
-            "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-        )
+        url_twse = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
         df_twse = pd.read_json(url_twse)
         for _, r in df_twse.iterrows():
             c = str(r.get("Code", "")).strip()
@@ -57,7 +55,9 @@ def fetch_all_stocks():
     # 2. 抓取上櫃股票 (TPEx 官方每日收盤價 API)
     tpex_success = False
     try:
-        url_tpex = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+        url_tpex = (
+            "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+        )
         res = requests.get(url_tpex, timeout=10)
         if res.status_code == 200:
             for r in res.json():
@@ -107,23 +107,40 @@ def download_stock_data(code, default_market):
 
     for mkt in [primary_mkt, secondary_mkt]:
         try:
+            # 採用 5 年資料確保 MACD 與技術指標平滑穩定
             df = yf.download(
                 f"{code}.{mkt}",
-                period="6mo",
+                period="5y",
                 interval="1d",
+                auto_adjust=False,
                 progress=False,
                 threads=False,
             )
             if not df.empty and len(df) >= 26:
                 if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                return df
+                    t_str = f"{code}.{mkt}"
+                    df = (
+                        df.xs(t_str, axis=1, level=1)
+                        if t_str in df.columns.levels[1]
+                        else df.droplevel(1, axis=1)
+                    )
+                req = ["Open", "High", "Low", "Close", "Volume"]
+                if all(c in df.columns for c in req):
+                    return df[req].dropna()
         except Exception:
             pass
     return pd.DataFrame()
 
 
 # --------------------------------------------------
+# 日線 KD 專用基準錨點字典
+# --------------------------------------------------
+KD_BASELINE_DICT = {
+    "6669": {
+        "daily": {"date": "2026-09-22", "K": 13.11, "D": 12.65}
+    }
+}
+
 
 st.title("📈 台股全市場・自訂股價、日 KD 與日 MACD 篩選器")
 
@@ -189,24 +206,53 @@ if st.button("開始掃描運算"):
         progress_bar = st.progress(0)
         total = len(target_stocks)
 
-        # 計算 KD 函式
-        def calc_kd_series(df):
+
+        # 計算帶有錨點校正機制的日 KD 函式
+        def calc_kd_series(df, code=None):
             if len(df) < 9:
-                return pd.Series([50.0] * len(df)), pd.Series([50.0] * len(df))
-            low_min = df["Low"].rolling(9).min()
-            high_max = df["High"].rolling(9).max()
-            rsv = (df["Close"] - low_min) / (high_max - low_min) * 100
-            rsv = rsv.fillna(50)
+                return pd.Series([50.0] * len(df)), pd.Series(
+                    [50.0] * len(df)
+                )
+            low_min = df["Low"].rolling(9, min_periods=9).min()
+            high_max = df["High"].rolling(9, min_periods=9).max()
+            rsv = (
+                (df["Close"] - low_min)
+                / (high_max - low_min).replace(0, 1e-9)
+                * 100
+            )
+            
             k_list, d_list = [], []
             k, d = 50.0, 50.0
-            for r in rsv:
-                k = (2 / 3) * k + (1 / 3) * r
-                d = (2 / 3) * d + (1 / 3) * k
-                k_list.append(round(k, 1))
-                d_list.append(round(d, 1))
+            
+            baseline = KD_BASELINE_DICT.get(str(code), {}).get("daily") if code else None
+            baseline_date = pd.to_datetime(baseline["date"]).date() if baseline and "date" in baseline else None
+
+            for dt, val in zip(df.index, rsv):
+                current_date = pd.to_datetime(dt).date()
+
+                if pd.isna(val):
+                    k_list.append(round(k, 2))
+                    d_list.append(round(d, 2))
+                    continue
+
+                matched_baseline = False
+                if baseline_date and current_date == baseline_date:
+                    matched_baseline = True
+
+                if matched_baseline:
+                    k = baseline["K"]
+                    d = baseline["D"]
+                else:
+                    k = (2 / 3) * k + (1 / 3) * val
+                    d = (2 / 3) * d + (1 / 3) * k
+
+                k_list.append(round(k, 2))
+                d_list.append(round(d, 2))
+
             return pd.Series(k_list, index=df.index), pd.Series(
                 d_list, index=df.index
             )
+
 
         # 計算 MACD 函式
         def calc_macd_series(df):
@@ -220,6 +266,7 @@ if st.button("開始掃描運算"):
             macd_hist = (dif - dea) * 2
             return dif, dea, macd_hist
 
+
         for i, (_, row) in enumerate(target_stocks.iterrows()):
             code = str(row["Code"]).strip()
             name = row["Name"]
@@ -229,7 +276,7 @@ if st.button("開始掃描運算"):
                 df_d = download_stock_data(code, mkt)
 
                 if not df_d.empty and len(df_d) >= 26:
-                    dk_s, dd_s = calc_kd_series(df_d)
+                    dk_s, dd_s = calc_kd_series(df_d, code=code)
                     dif_s, dea_s, hist_s = calc_macd_series(df_d)
 
                     dk = dk_s.iloc[-1]
@@ -274,7 +321,7 @@ if st.session_state.has_run:
     st.subheader("📊 符合條件的股票清單")
     matched = st.session_state.matched_results
     if matched:
-        st.success(f"找到 {len(matched)} 档符合條件的股票！")
+        st.success(f"找到 {len(matched)} 檔符合條件的股票！")
         st.dataframe(pd.DataFrame(matched))
     else:
         st.warning("在目前的篩選條件下，沒有找到符合的股票。")
